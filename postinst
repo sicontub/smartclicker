@@ -1,0 +1,5 @@
+#!/bin/sh
+for u in /var/jb/usr/bin/uicache /usr/bin/uicache; do
+  if [ -x "$u" ]; then "$u" -p /var/jb/Applications/SmartClicker.app >/dev/null 2>&1 || true; break; fi
+done
+exit 0

@@ -1,0 +1,9 @@
+Package: com.wmhakuifan.smartclicker
+Name: SmartClicker
+Version: 1.8.0
+Architecture: iphoneos-arm64
+Description: Auto clicker with image detection, ported from Smart AutoClicker for Android. Floating controls over any app: taps, swipes, pauses, and "tap when this image appears" scenarios. Open the SmartClicker app to start.
+Maintainer: WMHakuifan
+Author: WMHakuifan
+Section: Tweaks
+Depends: firmware (>= 15.0), mobilesubstrate (>= 0.9.5000) | ellekit, uikittools
