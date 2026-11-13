@@ -6,7 +6,7 @@ An Auto-clicker overlay that can be streamlined to your needs, such as daily que
 
 ## Requirements
 
-- iOS 15 or later (rootless or rootful, support past iOS 17.x isn't guranteed)
+- iOS 15 or later (rootless or rootful, support past iOS 17.x isn't guaranteed)
 - ElleKit (supplied with Dopamine jailbreaks)
 
 Tested on iPhone SE (2020), iOS 17.6.1 & iPad 7th Gen, iPadOS 17.5.1 all on Dopamine.
