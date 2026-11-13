@@ -13,10 +13,7 @@ Tested on iPhone SE (2020), iOS 17.6.1 & iPad 7th Gen, iPadOS 17.5.1 all on Dopa
 
 ## Install
 
-Download the proper `.deb` from Releases and open it your preferred package manager.
-arm - rootful
-arm64 - rootless
-
+Download the proper `.deb` for your jailbreak from Releases and open it your preferred package manager.
 
 ## Use
 
