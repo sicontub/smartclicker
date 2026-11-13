@@ -1,6 +1,6 @@
 # SmartClicker
 
-This is a port of version 3.5.2 of [Smart AutoClicker](https://github.com/Nain57/Smart-AutoClicker) for Android by Nain57 & other amazing contributors!!!
+This is a port of version 1.5.2 of [Smart AutoClicker](https://github.com/Nain57/Smart-AutoClicker) for Android by Nain57 & other amazing contributors!!!
 
 An Auto-clicker overlay that can be streamlined to your needs, such as daily quests in a game!
 
@@ -21,7 +21,7 @@ Download the proper `.deb` for your jailbreak from Releases and open it your pre
 2. Tap the List w/ the pointing finger to add events & conditions.
 3. Then, tap Play or hold the Play button for debug mode.
 
-Backups from the 3.5.2 version of Smart AutoClicker should transfer over well. Adjusting the images and click conditions may be required.
+Backups from the 1.5.2 version of Smart AutoClicker should transfer over well. Adjusting the images and click conditions may be required.
 
 ## Build
 
