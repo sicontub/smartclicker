@@ -21,11 +21,11 @@ Download the proper `.deb` for your jailbreak from Releases and open it in your 
 2. Tap the list button w/ a pointing index finger to then add events & conditions.
 3. Then, tap Play or hold Play for debug mode
 
-Backups use the same `.zip` format as the Android app, so scenarios can move between the two.
+Backups are in the same .zip format as the Android version. You may need to manually adjust clicks, images for conditions, and swipes.
 
 ## Triggers (Triggr, RemoteCompanion, Shortcuts, etc.)
 
-Scenarios can be started and stopped without the floating overlay
+Scenarios can be started and stopped without the overlay.
 
 From anything that runs a command:
 
