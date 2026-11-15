@@ -132,6 +132,34 @@ typedef struct { int w, h; uint8_t *px; } ACGray;
 
 static ACSurfaceRef gSurface;
 static uint8_t *gFallbackBuf;
+
+// Plus phones (and Display Zoom) draw at points x scale, then the panel shrinks it to nativeBounds.
+// capture at the drawn size; ac_probeCapture drops back to nativeBounds if the render server disagrees
+void ac_setupScreen(void) {
+  UIScreen *s = [UIScreen mainScreen];
+  gFixedSize = s.fixedCoordinateSpace.bounds.size;
+  gNativeScale = s.scale;
+  gNativeW = (int)lround(gFixedSize.width * s.scale);
+  gNativeH = (int)lround(gFixedSize.height * s.scale);
+}
+
+static void ac_saveScreenSize(void) {
+  [[NSFileManager defaultManager] createDirectoryAtPath:AC_DIR withIntermediateDirectories:YES attributes:nil error:NULL];
+  [@{ @"w" : @(gNativeW), @"h" : @(gNativeH), @"scale" : @(gNativeScale) } writeToFile:[AC_DIR stringByAppendingPathComponent:@"screen.plist"] atomically:YES];
+}
+
+CGSize ac_capturePixels(void) {
+  NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:[AC_DIR stringByAppendingPathComponent:@"screen.plist"]];
+  if ([d[@"w"] intValue] > 0 && [d[@"h"] intValue] > 0) return CGSizeMake([d[@"w"] intValue], [d[@"h"] intValue]);
+  UIScreen *s = [UIScreen mainScreen];
+  CGSize pt = s.fixedCoordinateSpace.bounds.size;
+  return CGSizeMake(lround(pt.width * s.scale), lround(pt.height * s.scale));
+}
+
+static void ac_makeSurface(void);
+
+// rows copied out of the capture; the player narrows this when only fixed-position conditions need checking
+static int gRowLo = 0, gRowHi = INT_MAX;
 static NSString *gDisplayName;
 static int gCaptureFn;
 
@@ -193,6 +221,35 @@ static void ac_probeCapture(void) {
       if (any && !gCaptureFn) { gCaptureFn = fn; gDisplayName = name; }
     }
   }
+  UIScreen *scr = [UIScreen mainScreen];
+  int nw = (int)scr.nativeBounds.size.width, nh = (int)scr.nativeBounds.size.height;
+  if (gCaptureFn && (nw < gNativeW || nh < gNativeH)) {
+    // if nothing lands past the panel's own size, the render server only gives us nativeBounds
+    p_SurfaceLock(gSurface, 0, NULL);
+    memset(p_SurfaceBase(gSurface), 0, p_SurfaceBPR(gSurface) * (size_t)gNativeH);
+    p_SurfaceUnlock(gSurface, 0, NULL);
+    ac_callCapture(gCaptureFn, gDisplayName);
+    p_SurfaceLock(gSurface, 1, NULL);
+    const uint8_t *b = (const uint8_t *)p_SurfaceBase(gSurface);
+    size_t bpr = p_SurfaceBPR(gSurface);
+    bool beyond = false;
+    for (int y = 0; y < gNativeH && !beyond; y += 7)
+      for (int x = nw; x < gNativeW && !beyond; x += 3) if (b[(size_t)y * bpr + x * 4 + 3]) beyond = true;
+    for (int y = nh; y < gNativeH && !beyond; y += 3)
+      for (int x = 0; x < gNativeW && !beyond; x += 7) if (b[(size_t)y * bpr + x * 4 + 3]) beyond = true;
+    p_SurfaceUnlock(gSurface, 1, NULL);
+    if (!beyond) {
+      CFRelease(gSurface);
+      gSurface = NULL;
+      free(gFallbackBuf);
+      gFallbackBuf = NULL;
+      gNativeW = nw;
+      gNativeH = nh;
+      gNativeScale = scr.nativeScale;
+      ac_makeSurface();
+    }
+  }
+  ac_saveScreenSize();
 }
 
 static bool ac_frameHasContent(const uint8_t *base, size_t bpr) {
@@ -202,9 +259,16 @@ static bool ac_frameHasContent(const uint8_t *base, size_t bpr) {
   return false;
 }
 
+// keeps the old buffer when the size is unchanged, so the player can reuse it every pass
+static void ac_graySize(ACGray *g, int w, int h) {
+  if (g->px && g->w == w && g->h == h) return;
+  free(g->px);
+  g->w = w; g->h = h;
+  g->px = (uint8_t *)malloc((size_t)(w > 0 ? w : 1) * (h > 0 ? h : 1));
+}
+
 static void ac_grayDownsample(const ACGray *in, int f, ACGray *out) {
-  out->w = in->w / f; out->h = in->h / f;
-  out->px = (uint8_t *)malloc((size_t)(out->w > 0 ? out->w : 1) * (out->h > 0 ? out->h : 1));
+  ac_graySize(out, in->w / f, in->h / f);
   int n = f * f;
   for (int by = 0; by < out->h; by++)
     for (int bx = 0; bx < out->w; bx++) {
@@ -218,8 +282,7 @@ static void ac_grayDownsample(const ACGray *in, int f, ACGray *out) {
 }
 
 static void ac_grayFromBGRA(const uint8_t *base, size_t bpr, int x0, int y0, int w, int h, int f, ACGray *out) {
-  out->w = w / f; out->h = h / f;
-  out->px = (uint8_t *)malloc((size_t)(out->w > 0 ? out->w : 1) * (out->h > 0 ? out->h : 1));
+  ac_graySize(out, w / f, h / f);
   int n = f * f;
   for (int by = 0; by < out->h; by++) {
     for (int bx = 0; bx < out->w; bx++) {
@@ -233,7 +296,7 @@ static void ac_grayFromBGRA(const uint8_t *base, size_t bpr, int x0, int y0, int
   }
 }
 
-bool ac_withScreen(void (^use)(const uint8_t *base, size_t bpr)) {
+static void ac_makeSurface(void) {
   if (!gSurface && p_SurfaceCreate) {
     // render server wants 64-byte aligned strides
     size_t bpr = (size_t)gNativeW * 4, alloc;
@@ -247,6 +310,10 @@ bool ac_withScreen(void (^use)(const uint8_t *base, size_t bpr)) {
     };
     gSurface = p_SurfaceCreate((__bridge CFDictionaryRef)props);
   }
+}
+
+bool ac_withScreen(void (^use)(const uint8_t *base, size_t bpr)) {
+  ac_makeSurface();
   if (gSurface && p_SurfaceLock) {
     if (!gCaptureFn && !gProbed) ac_probeCapture();
     if (gCaptureFn) {
@@ -258,7 +325,8 @@ bool ac_withScreen(void (^use)(const uint8_t *base, size_t bpr)) {
       if (any) {
         // uncached memory
         if (!gFallbackBuf) gFallbackBuf = (uint8_t *)malloc((size_t)gNativeW * gNativeH * 4);
-        for (int y = 0; y < gNativeH; y++) memcpy(gFallbackBuf + (size_t)y * gNativeW * 4, base + (size_t)y * bpr, (size_t)gNativeW * 4);
+        for (int y = MAX(0, gRowLo); y < MIN(gNativeH, gRowHi); y++)
+          memcpy(gFallbackBuf + (size_t)y * gNativeW * 4, base + (size_t)y * bpr, (size_t)gNativeW * 4);
         p_SurfaceUnlock(gSurface, 1, NULL);
         use(gFallbackBuf, (size_t)gNativeW * 4);
         return true;
@@ -285,6 +353,101 @@ bool ac_withScreen(void (^use)(const uint8_t *base, size_t bpr)) {
   CGImageRelease(cg);
   use(gFallbackBuf, (size_t)gNativeW * 4);
   return true;
+}
+
+#pragma mark Half resolution capture
+
+// whole-screen matching shrinks the frame anyway, so the render server can draw it at half size:
+// a quarter of the pixels to render and copy. only used once a test shows it matches a shrunk full frame
+static ACSurfaceRef gHalfSurface;
+static uint8_t *gHalfBuf;
+static int gHalfW, gHalfH, gHalfState, gHalfTries; // state 1 works, -1 doesn't, 0 not known yet
+static CATransform3D gHalfT;
+
+static bool ac_halfCall(CATransform3D t) {
+  uint32_t port = gCaptureFn >= 10 && p_ServerPort ? p_ServerPort(0) : 0;
+  CFStringRef n = (__bridge CFStringRef)gDisplayName;
+  int fam = gCaptureFn % 10;
+  if ((fam == 1 || fam == 3) && p_CaptureDisplayT) p_CaptureDisplayT(port, n, gHalfSurface, 0, 0, t);
+  else if ((fam == 2 || fam == 4) && p_RenderDisplayT) p_RenderDisplayT(port, n, gHalfSurface, 0, 0, t);
+  else return false;
+  return true;
+}
+
+static bool ac_halfGrab(CATransform3D t) {
+  if (!gHalfSurface) {
+    gHalfW = gNativeW / 2; gHalfH = gNativeH / 2;
+    size_t bpr = (size_t)gHalfW * 4, alloc;
+    if (p_SurfaceAlign) bpr = p_SurfaceAlign(CFSTR("IOSurfaceBytesPerRow"), bpr);
+    alloc = bpr * (size_t)gHalfH;
+    if (p_SurfaceAlign) alloc = p_SurfaceAlign(CFSTR("IOSurfaceAllocSize"), alloc);
+    NSDictionary *props = @{
+      @"IOSurfaceWidth" : @(gHalfW), @"IOSurfaceHeight" : @(gHalfH), @"IOSurfaceBytesPerElement" : @4,
+      @"IOSurfaceBytesPerRow" : @(bpr), @"IOSurfacePixelFormat" : @(0x42475241), @"IOSurfaceAllocSize" : @(alloc),
+      @"IOSurfaceIsGlobal" : @YES
+    };
+    gHalfSurface = p_SurfaceCreate((__bridge CFDictionaryRef)props);
+    if (!gHalfSurface) return false;
+  }
+  if (!gHalfBuf) gHalfBuf = (uint8_t *)malloc((size_t)gHalfW * gHalfH * 4);
+  p_SurfaceLock(gHalfSurface, 0, NULL);
+  memset(p_SurfaceBase(gHalfSurface), 0, p_SurfaceBPR(gHalfSurface) * (size_t)gHalfH);
+  p_SurfaceUnlock(gHalfSurface, 0, NULL);
+  if (!ac_halfCall(t)) return false;
+  p_SurfaceLock(gHalfSurface, 1, NULL);
+  const uint8_t *base = (const uint8_t *)p_SurfaceBase(gHalfSurface);
+  size_t bpr = p_SurfaceBPR(gHalfSurface);
+  bool any = false;
+  for (int y = 0; y < gHalfH && !any; y += 19)
+    for (int x = 0; x < gHalfW && !any; x += 15) any = base[(size_t)y * bpr + x * 4 + 3] != 0;
+  if (any)
+    for (int y = 0; y < gHalfH; y++) memcpy(gHalfBuf + (size_t)y * gHalfW * 4, base + (size_t)y * bpr, (size_t)gHalfW * 4);
+  p_SurfaceUnlock(gHalfSurface, 1, NULL);
+  return any;
+}
+
+// compares a half capture against a full one shrunk 2x. returns 1 same, -1 different, 0 can't tell (flat screen)
+static int ac_halfCompare(void) {
+  uint64_t diff = 0, n = 0;
+  double sum = 0, sq = 0;
+  for (int y = 1; y < gHalfH - 1; y += 3) {
+    for (int x = 1; x < gHalfW - 1; x += 3) {
+      const uint8_t *h = gHalfBuf + ((size_t)y * gHalfW + x) * 4;
+      const uint8_t *a = gFallbackBuf + ((size_t)(y * 2) * gNativeW + x * 2) * 4, *b = a + (size_t)gNativeW * 4;
+      for (int c = 0; c < 3; c++) {
+        int v = (a[c] + a[c + 4] + b[c] + b[c + 4] + 2) / 4;
+        diff += (uint64_t)abs(v - h[c]);
+        sum += v; sq += (double)v * v;
+      }
+      n += 3;
+    }
+  }
+  if (!n) return -1;
+  double mean = sum / n, sd = sqrt(MAX(0, sq / n - mean * mean));
+  if (sd < 12) return 0;
+  return (double)diff / n < 6 ? 1 : -1;
+}
+
+// settles whether half captures can be used. a few tries, since the game may move between the two grabs
+static void ac_halfTest(void) {
+  if (gHalfState || !gCaptureFn || !p_SurfaceCreate || !p_SurfaceLock || gNativeW < 4 || gNativeH < 4) {
+    if (!gHalfState && gProbed && !gCaptureFn) gHalfState = -1;
+    return;
+  }
+  if (!(gCaptureFn % 10 == 1 || gCaptureFn % 10 == 3 ? p_CaptureDisplayT : p_RenderDisplayT)) { gHalfState = -1; return; }
+  CATransform3D s = CATransform3DMakeScale(0.5, 0.5, 1);
+  // scale about the top left corner, or about the centre (in pixels or in points)
+  CATransform3D ts[3] = { s, CATransform3DTranslate(s, -gNativeW / 2.0, -gNativeH / 2.0, 0),
+                          CATransform3DTranslate(s, -gFixedSize.width / 2, -gFixedSize.height / 2, 0) };
+  bool flat = false;
+  for (int i = 0; i < 3; i++) {
+    if (!ac_withScreen(^(const uint8_t *base, size_t bpr) {})) return;
+    if (!ac_halfGrab(ts[i])) continue;
+    int r = ac_halfCompare();
+    if (r == 1) { gHalfT = ts[i]; gHalfState = 1; return; }
+    if (r == 0) flat = true;
+  }
+  if (!flat && ++gHalfTries >= 3) gHalfState = -1;
 }
 
 static double ac_diffAt(const ACGray *fr, const ACGray *t, int ox, int oy, double limit) {
@@ -325,8 +488,7 @@ int ac_qualityFactor(NSDictionary *scenario) {
 }
 static int ac_coarseStep(int f) { return MAX(1, (int)lround(8.0 / f)); }
 
-static uint8_t *ac_shrinkBGR(const uint8_t *src, size_t stride, int x0, int y0, int ow, int oh, int f) {
-  uint8_t *out = (uint8_t *)malloc((size_t)ow * oh * 3);
+static void ac_shrinkInto(uint8_t *out, const uint8_t *src, size_t stride, int x0, int y0, int ow, int oh, int f) {
   unsigned n = (unsigned)f * f;
   for (int y = 0; y < oh; y++) {
     for (int x = 0; x < ow; x++) {
@@ -339,6 +501,11 @@ static uint8_t *ac_shrinkBGR(const uint8_t *src, size_t stride, int x0, int y0, 
       o[0] = (b + n / 2) / n; o[1] = (g + n / 2) / n; o[2] = (r + n / 2) / n;
     }
   }
+}
+
+static uint8_t *ac_shrinkBGR(const uint8_t *src, size_t stride, int x0, int y0, int ow, int oh, int f) {
+  uint8_t *out = (uint8_t *)malloc((size_t)ow * oh * 3);
+  ac_shrinkInto(out, src, stride, x0, y0, ow, oh, f);
   return out;
 }
 
@@ -402,11 +569,15 @@ static ACCond *ac_loadCond(NSDictionary *d, int f) {
   return c;
 }
 
-static bool ac_match(ACCond *c, const uint8_t *screen, const ACGray *fine, const ACGray *coarse, int f) {
+// sw/sh: size of the frame in screen, scale: 1 full size, 2 half size (whole-screen conditions only)
+static bool ac_match(ACCond *c, const uint8_t *screen, int sw, int sh, int scale, const ACGray *fine, const ACGray *coarse, int f) {
+  static uint8_t *reg;
+  static size_t regCap;
   c.lastConf = 0;
   if (!c->ok || !screen) return false;
   double conf, cdiff;
   if (!c.whole) {
+    if (scale != 1) return false;
     c.found = CGPointMake((c.x + c.w / 2.0) / gNativeScale, (c.y + c.h / 2.0) / gNativeScale);
     if (c.x < 0 || c.y < 0 || c.x + c.w > gNativeW || c.y + c.h > gNativeH) return false;
     ac_score(screen + (size_t)c.y * gNativeW * 4 + (size_t)c.x * 4, (size_t)gNativeW * 4, 4, c->bgra, (size_t)c.w * 4, 4, c.w, c.h, &conf, &cdiff);
@@ -445,10 +616,13 @@ static bool ac_match(ACCond *c, const uint8_t *screen, const ACGray *fine, const
     for (int j = 0; j < np; j++) if (px[j] == fx && py[j] == fy) dup = true;
     if (dup) continue;
     px[np] = fx; py[np] = fy; np++;
-    if ((fx + c->sw) * f > gNativeW || (fy + c->sh) * f > gNativeH) continue;
-    uint8_t *reg = ac_shrinkBGR(screen, (size_t)gNativeW * 4, fx * f, fy * f, c->sw, c->sh, f);
+    int g = f / scale;
+    if ((fx + c->sw) * g > sw || (fy + c->sh) * g > sh) continue;
+    size_t need = (size_t)c->sw * c->sh * 3;
+    if (need > regCap) { free(reg); reg = (uint8_t *)malloc(need); regCap = reg ? need : 0; }
+    if (!reg) continue;
+    ac_shrinkInto(reg, screen, (size_t)sw * 4, fx * g, fy * g, c->sw, c->sh, g);
     ac_score(reg, (size_t)c->sw * 3, 3, c->small, (size_t)c->sw * 3, 3, c->sw, c->sh, &conf, &cdiff);
-    free(reg);
     bool v = ac_valid(conf, cdiff, c.tolerance);
     if ((v && !found) || (v == found && conf > bestConf)) {
       found = v; bestConf = conf;
@@ -616,7 +790,8 @@ void ac_play(NSDictionary *scenario) {
   if (!gDebugLock) gDebugLock = [NSObject new];
   @synchronized(gDebugLock) { gDebugInfo = nil; }
   int f = ac_qualityFactor(scenario);
-  // no interval, passes run back to back (capped at 60hz)
+  // no conditions: passes back to back (60hz). with conditions every pass is a full screen capture,
+  // which the game pays for too, so cap at 20 a second and never be busy more than half the time
   double interval = 16;
   mach_timebase_info_data_t tb;
   mach_timebase_info(&tb);
@@ -625,29 +800,61 @@ void ac_play(NSDictionary *scenario) {
   bool rnd = [scenario[@"randomize"] boolValue];
   NSArray *events = scenario[@"events"];
   NSMutableArray *conds = [NSMutableArray new];
-  bool needCapture = false;
+  bool needCapture = false, needGray = false, needExact = false;
+  for (NSDictionary *e in events)
+    for (NSDictionary *cd in e[@"conditions"]) {
+      needCapture = true;
+      if ([cd[@"whole"] boolValue]) needGray = true; else needExact = true;
+    }
+  // only whole-screen conditions: try half size captures. the shrink factor has to split evenly in two
+  bool half = false;
+  if (needGray && !needExact && f >= 2) {
+    ac_halfTest();
+    if (gHalfState == 1) { half = true; if (f % 2) f--; }
+  }
+  int scale = half ? 2 : 1;
   for (NSDictionary *e in events) {
     NSMutableArray *list = [NSMutableArray new];
-    for (NSDictionary *cd in e[@"conditions"]) { [list addObject:ac_loadCond(cd, f)]; needCapture = true; }
+    for (NSDictionary *cd in e[@"conditions"]) {
+      [list addObject:ac_loadCond(cd, f)];
+    }
     [conds addObject:list];
+  }
+  if (needCapture) interval = 50;
+  if (needCapture && !needGray) {
+    int lo = INT_MAX, hi = 0;
+    for (NSArray *cl in conds)
+      for (ACCond *c in cl) { lo = MIN(lo, c.y); hi = MAX(hi, c.y + c.h); }
+    if (hi > lo) { gRowLo = lo; gRowHi = hi; }
   }
   NSUInteger n = events.count;
   long *execs = (long *)calloc(n ? n : 1, sizeof(long));
   #define AC_MS(t0) ((double)(mach_absolute_time() - (t0)) * tb.numer / tb.denom / 1e6)
   NSString *reason = @"Stopped";
-  ACGray fine = {0}, coarse = {0};
+  __block ACGray fine = {0}, coarse = {0};
   while (gRunning) {
     @autoreleasepool {
       uint64_t start = mach_absolute_time();
+      double acting = 0;
+      const uint8_t *screen = gFallbackBuf;
+      int sw = gNativeW, sh = gNativeH;
       if (needCapture) {
-        free(fine.px); free(coarse.px); fine.px = coarse.px = NULL;
-        __block ACGray fi = {0}, co = {0};
-        bool ok = ac_withScreen(^(const uint8_t *base, size_t bpr) {
-          ac_grayFromBGRA(base, bpr, 0, 0, gNativeW, gNativeH, f, &fi);
-          ac_grayDownsample(&fi, ac_coarseStep(f), &co);
-        });
+        bool ok;
+        if (half && ac_halfGrab(gHalfT)) {
+          ac_grayFromBGRA(gHalfBuf, (size_t)gHalfW * 4, 0, 0, gHalfW, gHalfH, f / 2, &fine);
+          ac_grayDownsample(&fine, ac_coarseStep(f), &coarse);
+          ok = true;
+          screen = gHalfBuf; sw = gHalfW; sh = gHalfH; scale = 2;
+        } else {
+          // full size, also the fallback if a half capture comes back empty
+          ok = ac_withScreen(^(const uint8_t *base, size_t bpr) {
+            if (!needGray) return;
+            ac_grayFromBGRA(base, bpr, 0, 0, gNativeW, gNativeH, f, &fine);
+            ac_grayDownsample(&fine, ac_coarseStep(f), &coarse);
+          });
+          screen = gFallbackBuf; sw = gNativeW; sh = gNativeH; scale = 1;
+        }
         if (!ok) { reason = @"Screen capture failed"; break; }
-        fine = fi; coarse = co;
       }
       for (NSUInteger i = 0; i < n && gRunning; i++) {
         NSDictionary *e = events[i];
@@ -655,7 +862,7 @@ void ac_play(NSDictionary *scenario) {
         bool all = [e[@"all"] boolValue] || cl.count == 0;
         bool fulfilled = all;
         for (ACCond *c in cl) {
-          bool seen = ac_match(c, gFallbackBuf, &fine, &coarse, f);
+          bool seen = ac_match(c, screen, sw, sh, scale, &fine, &coarse, f);
           c->seen = seen;
           if (gDebug) ac_debugSet(@{ @"current" : @(c.lastConf) });
           bool met = c.detect ? seen : !seen;
@@ -675,6 +882,7 @@ void ac_play(NSDictionary *scenario) {
           }
           ac_debugSet(dbg);
         }
+        uint64_t actStart = mach_absolute_time();
         for (NSDictionary *a in e[@"actions"]) {
           if (!gRunning) break;
           NSString *t = a[@"t"];
@@ -690,6 +898,7 @@ void ac_play(NSDictionary *scenario) {
           else
             ac_doTap(p, d);
         }
+        acting += AC_MS(actStart);
         execs[i]++;
         if (ends.count) {
           NSUInteger reached = 0;
@@ -702,9 +911,12 @@ void ac_play(NSDictionary *scenario) {
         break; // one event per pass, same as android
       }
       double elapsed = AC_MS(start);
-      if (gRunning && elapsed < interval) ac_sleepMs(interval - elapsed);
+      // taps and pauses aren't detection work, so they don't count towards the half-the-time limit
+      double rest = needCapture ? MAX(interval - elapsed, elapsed - acting) : interval - elapsed;
+      if (gRunning && rest > 0) ac_sleepMs(rest);
     }
   }
+  gRowLo = 0; gRowHi = INT_MAX;
   free(fine.px); free(coarse.px); free(execs);
   gRunning = false;
   dispatch_async(dispatch_get_main_queue(), ^{ if (gOnStop) gOnStop(reason); });

@@ -31,11 +31,17 @@ clang-21 -target arm64-apple-ios15.0 $LDFLAGS -o "$OUT/SmartClicker" "$OUT/main.
   -framework UniformTypeIdentifiers -lz -lobjc
 "$TOOLBIN/ldid" -S"$HERE/App/entitlements.plist" "$OUT/SmartClicker"
 
+# command-line tool
+clang-21 -target arm64-apple-ios15.0 $CFLAGS $LDFLAGS -I"$HERE" -o "$OUT/smartclicker" "$HERE/Tool/smartclicker.m" -framework Foundation -lobjc
+"$TOOLBIN/ldid" -S "$OUT/smartclicker"
+
 # rootless (/var/jb, iphoneos-arm64) and rootful (/, iphoneos-arm)
 package() { # $1 = install prefix ("" or /var/jb), $2 = dpkg architecture, $3 = file suffix
   local P="$OUT/pkg$3" PFX="$1"
   rm -rf "$P"
-  mkdir -p "$P/DEBIAN" "$P$PFX/Library/MobileSubstrate/DynamicLibraries" "$P$PFX/Applications/SmartClicker.app"
+  mkdir -p "$P/DEBIAN" "$P$PFX/Library/MobileSubstrate/DynamicLibraries" "$P$PFX/Applications/SmartClicker.app" "$P$PFX/usr/bin"
+  cp "$OUT/smartclicker" "$P$PFX/usr/bin/"
+  chmod 755 "$P$PFX/usr/bin/smartclicker"
   sed "s/^Architecture: .*/Architecture: $2/" "$HERE/control" > "$P/DEBIAN/control"
   for s in postinst prerm; do
     sed "s#/var/jb/Applications#$PFX/Applications#g" "$HERE/$s" > "$P/DEBIAN/$s"

@@ -17,6 +17,8 @@ static inline void ac_after(double sec, void (^b)(void)) {
 extern CGSize gFixedSize;
 extern CGFloat gNativeScale;
 extern int gNativeW, gNativeH;
+void ac_setupScreen(void);
+CGSize ac_capturePixels(void); // pixel size conditions are stored in
 
 void ac_loadSymbols(void);
 void ac_hidSetup(void);

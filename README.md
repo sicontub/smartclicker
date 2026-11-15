@@ -1,34 +1,59 @@
 # SmartClicker
 
-This is a port of version 1.5.2 of [Smart AutoClicker](https://github.com/Nain57/Smart-AutoClicker) for Android by Nain57 & other amazing contributors!!!
+An auto clicker with image detection for jailbroken iOS. It is a port of
+[Smart AutoClicker](https://github.com/Nain57/Smart-AutoClicker) for Android by Nain57.
 
-An Auto-clicker overlay that can be streamlined to your needs, such as daily quests in a game!
+A floating menu sits over any app. Scenarios are lists of events; each event has image
+conditions ("when this picture is on screen") and actions (click, swipe, wait, open app).
 
 ## Requirements
 
-- iOS 15 or later (rootless, rootful, & roothide. support past iOS 17.x isn't guaranteed)
-- ElleKit (supplied with Dopamine jailbreaks)
+- Jailbroken iOS 15 or later (rootless or rootful), arm64 or arm64e
+- ElleKit or Substrate
 
-Tested on an iPhone 6S Plus, iOS 15.8.3, iPhone SE (2020), iOS 17.6.1 & iPad 7th Gen, iPadOS 17.5.1 all on Dopamine.
+Developed and tested on an iPhone SE (2020), iOS 17.6.1, Dopamine. Other setups are untested.
 
 ## Install
 
-Download the proper `.deb` for your jailbreak from Releases and open it your preferred package manager.
+Download the `.deb` from Releases and open it in Sileo or Zebra:
+
+- `iphoneos-arm64` for rootless jailbreaks (Dopamine, palera1n rootless)
+- `iphoneos-arm` for rootful jailbreaks
 
 ## Use
 
-1. Create a new scenario in the app with the `+` button, click it, and you'll be shown the overlay.
-2. Tap the List w/ the pointing finger to add events & conditions.
-3. Then, tap Play or hold the Play button for debug mode.
+1. Open the SmartClicker app, create a scenario and tap it. The floating menu appears.
+2. Tap the list button to add events, conditions and actions.
+3. Tap play. Long-press play for debug mode.
 
-Backups from the 1.5.2 version of Smart AutoClicker should transfer over well. Adjusting the images and click conditions may be required.
+Backups use the same `.zip` format as the Android app, so scenarios can move between the two.
+
+## Triggers (Triggr, RemoteCompanion, Shortcuts)
+
+Scenarios can be started and stopped without the floating menu.
+
+From anything that runs a command (Triggr, RemoteCompanion, a terminal):
+
+    smartclicker play "Daily quests"    # start a scenario by name (or number)
+    smartclicker stop
+    smartclicker toggle                 # start or stop the last used scenario
+    smartclicker show / hide            # show or hide the floating menu
+    smartclicker list                   # scenario names and numbers
+
+From anything that opens a link (Triggr, the Shortcuts app):
+
+    smartclicker://play?scenario=Daily%20quests
+    smartclicker://stop
+    smartclicker://toggle
+
+Links briefly open the SmartClicker app; the command doesn't.
 
 ## Build
 
-Linux is just fine. Check out the header of `build-linux-clang21.sh` for the toolchain.
+Linux, no Theos needed. See the header of `build-linux-clang21.sh` for the toolchain.
 
     SDK=/path/to/iPhoneOS16.5.sdk TOOLBIN=/path/to/cctools/bin bash build-linux-clang21.sh
 
 ## License
 
-GPL-3.0. See `LICENSE`.
+GPL-3.0, the same license as Smart AutoClicker. See `LICENSE`.

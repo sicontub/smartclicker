@@ -1,6 +1,8 @@
 // SmartClicker overlay (runs in SpringBoard)
 #import "Engine.h"
 #import "Shared/SCMaterial.h"
+#import "Shared/Remote.h"
+#include <notify.h>
 #import <QuartzCore/QuartzCore.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
@@ -216,6 +218,18 @@ static void ac_orientRoot(UIView *root, double a) {
   root.bounds = CGRectMake(0, 0, sz.width, sz.height);
   root.center = CGPointMake(CGRectGetMidX(wb), CGRectGetMidY(wb));
   root.transform = CGAffineTransformMakeRotation(a);
+}
+
+// the part of the content clear of the notch, Dynamic Island and home indicator
+static CGRect ac_safeRect(UIView *root) {
+  UIWindow *w = root.window;
+  if (!w) return root.bounds;
+  UIEdgeInsets in = w.safeAreaInsets;
+  // a plain 20pt status bar isn't a notch, the menu can sit over it
+  if (in.top <= 24) in.top = 0;
+  CGRect r = [w convertRect:UIEdgeInsetsInsetRect(w.bounds, in) toView:root];
+  r = CGRectIntersection(root.bounds, r);
+  return CGRectIsNull(r) || r.size.width < 100 || r.size.height < 100 ? root.bounds : r;
 }
 
 static UIView *ac_root(UIWindow *w) { return [w.rootViewController.view viewWithTag:4242]; }
@@ -654,11 +668,8 @@ static CGPathRef ac_playPausePath(BOOL pause, CGFloat size) {
 }
 
 - (void)setup {
-  UIScreen *s = [UIScreen mainScreen];
-  gFixedSize = s.fixedCoordinateSpace.bounds.size;
-  gNativeScale = s.nativeScale;
-  gNativeW = (int)s.nativeBounds.size.width;
-  gNativeH = (int)s.nativeBounds.size.height;
+  ac_setupScreen();
+  ac_withScreen(^(const uint8_t *base, size_t bpr) {}); // settles the capture size before anything is captured
   ac_hidSetup();
   __weak ACOverlay *ws = self;
   gOnStop = ^(NSString *reason) {
@@ -731,13 +742,14 @@ static CGPathRef ac_playPausePath(BOOL pause, CGFloat size) {
     self.menuOrigin = pos[kx] ? CGPointMake([pos[kx] doubleValue], [pos[ky] doubleValue]) : CGPointMake(4, sb.height * 0.3);
     self.menuPlaced = YES;
   }
-  CGPoint o = self.menuOrigin;
-  o.x = MAX(0, MIN(o.x, sb.width - w));
-  o.y = MAX(0, MIN(o.y, sb.height - h));
-  self.menuOrigin = o;
   if (!self.menuWin) self.menuWin = ac_window(1100, YES);
   UIView *root = ac_root(self.menuWin);
   ac_orientRoot(root, a);
+  CGRect safe = ac_safeRect(root);
+  CGPoint o = self.menuOrigin;
+  o.x = MAX(CGRectGetMinX(safe), MIN(o.x, CGRectGetMaxX(safe) - w));
+  o.y = MAX(CGRectGetMinY(safe), MIN(o.y, CGRectGetMaxY(safe) - h));
+  self.menuOrigin = o;
   for (UIView *v in [root.subviews copy]) [v removeFromSuperview];
   UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(o.x, o.y, w, h)];
   panel.backgroundColor = SC_OVERLAY_BG;
@@ -843,10 +855,11 @@ static CGPathRef ac_playPausePath(BOOL pause, CGFloat size) {
 - (void)dragMenu:(UIPanGestureRecognizer *)g {
   UIView *root = ac_root(self.menuWin), *panel = self.menuPanel;
   CGPoint t = [g translationInView:root];
-  CGSize sb = root.bounds.size, sz = panel.bounds.size;
+  CGRect safe = ac_safeRect(root);
+  CGSize sz = panel.bounds.size;
   CGPoint o = self.menuOrigin;
-  o.x = MAX(0, MIN(o.x + t.x, sb.width - sz.width));
-  o.y = MAX(0, MIN(o.y + t.y, sb.height - sz.height));
+  o.x = MAX(CGRectGetMinX(safe), MIN(o.x + t.x, CGRectGetMaxX(safe) - sz.width));
+  o.y = MAX(CGRectGetMinY(safe), MIN(o.y + t.y, CGRectGetMaxY(safe) - sz.height));
   self.menuOrigin = o;
   panel.frame = CGRectMake(o.x, o.y, sz.width, sz.height);
   [g setTranslation:CGPointZero inView:root];
@@ -854,7 +867,7 @@ static CGPathRef ac_playPausePath(BOOL pause, CGFloat size) {
     [[NSFileManager defaultManager] createDirectoryAtPath:AC_DIR withIntermediateDirectories:YES attributes:nil error:NULL];
     NSString *path = [AC_DIR stringByAppendingPathComponent:@"menu.plist"];
     NSMutableDictionary *pos = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary new];
-    BOOL land = sb.width > sb.height;
+    BOOL land = root.bounds.size.width > root.bounds.size.height;
     pos[land ? @"lx" : @"x"] = @(o.x);
     pos[land ? @"ly" : @"y"] = @(o.y);
     [pos writeToFile:path atomically:YES];
@@ -950,13 +963,52 @@ static CGPathRef ac_playPausePath(BOOL pause, CGFloat size) {
   ac_load();
   NSDictionary *sc = ac_mutableDeep(ac_current());
   if ([sc[@"events"] count] == 0) { [self openEventList]; return; }
+  [self startPlaying:sc debug:debug];
+}
+
+- (void)startPlaying:(NSDictionary *)sc debug:(BOOL)debug {
+  static NSLock *lock;
+  if (!lock) lock = [NSLock new];
+  gRunning = false; // a run that's still finishing stops first
   gDebug = debug;
-  gRunning = true;
   if (debug) { [self buildMenu:0]; [self startDebugDisplay]; }
-  [self refreshPlay];
-  NSThread *t = [[NSThread alloc] initWithBlock:^{ ac_play(sc); }];
-  t.qualityOfService = NSQualityOfServiceUserInteractive; // otherwise passes get throttled
+  NSThread *t = [[NSThread alloc] initWithBlock:^{
+    [lock lock];
+    gRunning = true;
+    dispatch_async(dispatch_get_main_queue(), ^{ [self refreshPlay]; });
+    ac_play(sc);
+    [lock unlock];
+  }];
+  t.qualityOfService = NSQualityOfServiceUserInitiated; // below the game, but not throttled like background work
   [t start];
+}
+
+- (void)remote:(uint64_t)state {
+  if (!self.ready) return;
+  int action = (int)(state & 0xFF);
+  long idx = (long)(state >> 8) - 1;
+  ac_load();
+  BOOL switched = NO;
+  if (idx >= 0 && idx < (long)ac_scenarios().count && idx != [gRoot[@"selected"] longValue]) {
+    gRoot[@"selected"] = @(idx);
+    ac_save();
+    switched = YES;
+  }
+  if (action == SCRemoteToggle) action = gRunning && !switched ? SCRemoteStop : SCRemotePlay;
+  switch (action) {
+    case SCRemoteShow: [self show]; break;
+    case SCRemoteHide: [self hide]; break;
+    case SCRemoteStop:
+      if (gRunning) { gRunning = false; [self refreshPlay]; }
+      break;
+    case SCRemotePlay: {
+      if (gRunning && !switched) break;
+      NSDictionary *sc = ac_mutableDeep(ac_current());
+      if ([sc[@"events"] count] == 0) { gRunning = false; [self refreshPlay]; break; }
+      [self startPlaying:sc debug:NO];
+      break;
+    }
+  }
 }
 
 #pragma mark Dialog plumbing
@@ -1798,6 +1850,12 @@ static void ac_hideNote(CFNotificationCenterRef c, void *o, CFNotificationName n
 
 __attribute__((constructor)) static void ac_init(void) {
   ac_loadSymbols();
+  int tok;
+  notify_register_dispatch(SC_REMOTE_NOTE, &tok, dispatch_get_main_queue(), ^(int t) {
+    uint64_t state = 0;
+    notify_get_state(t, &state);
+    [[ACOverlay shared] remote:state];
+  });
   CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ac_showNote, CFSTR("com.wmhakuifan.smartclicker/show"), NULL,
                                   CFNotificationSuspensionBehaviorDeliverImmediately);
   CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ac_hideNote, CFSTR("com.wmhakuifan.smartclicker/hide"), NULL,
