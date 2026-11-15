@@ -13,7 +13,7 @@ Tested on an iPhone 6S Plus, iOS 15.8.3, iPad 7th Gen, iPadOS 17.5.1, & iPhone S
 
 ## Install
 
-Download the proper `.deb` for your jailbreak from Releases and open it in your preferred package
+Download the proper `.deb` for your jailbreak from Releases and open it in your preferred package manager.
 
 ## Use
 
